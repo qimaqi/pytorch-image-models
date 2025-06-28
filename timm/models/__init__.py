@@ -86,6 +86,10 @@ from .xception import *
 from .xception_aligned import *
 from .xcit import *
 
+# from .inception_former import *
+from .hiera_inception_former import *
+
+
 from ._builder import (
     build_model_with_cfg as build_model_with_cfg,
     load_pretrained as load_pretrained,

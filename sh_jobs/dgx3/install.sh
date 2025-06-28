@@ -17,10 +17,7 @@ export CONDA_OVERRIDE_CUDA=11.8
 export CUDA_HOME=$CONDA_PREFIX
 export PATH=$CUDA_HOME/bin:$PATH
 
+cd /usr/bmicnas02/data-biwi-01/qimaqi_data/workspace/neurips_2025/ConvPixelFormer/luna_exps
+source /scratch_net/schusch/qimaqi/miniconda3/etc/profile.d/conda.sh
+conda create -n timm python=3.10
 
-conda activate timm
-
-
-cd /insait/qimaqi/workspace/pytorch-image-models
-
-./distributed_train.sh 1 --data-dir /insait/imagenet21k/imagenet21k_resized/ --model seresnet34 --sched cosine --epochs 150 --warmup-epochs 5 --lr 0.4 --reprob 0.5 --remode pixel --batch-size 256 --amp -j 1
