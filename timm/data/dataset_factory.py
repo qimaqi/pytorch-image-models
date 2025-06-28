@@ -115,6 +115,9 @@ def create_dataset(
         name = name.split('/', 2)[-1]
         torch_kwargs = dict(root=root, download=download, **kwargs)
         if name in _TORCH_BASIC_DS:
+            if 'CIFAR' in name.upper():
+                torch_kwargs['download'] = True  # CIFAR10 is not downloaded by default
+                print("torch_kwargs", torch_kwargs)
             ds_class = _TORCH_BASIC_DS[name]
             use_train = split in _TRAIN_SYNONYM
             ds = ds_class(train=use_train, **torch_kwargs)

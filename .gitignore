@@ -119,3 +119,5 @@ Testing notebook.ipynb
 /*.png
 /*.zip
 /*.tar.*
+
+data/

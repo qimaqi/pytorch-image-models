@@ -56,6 +56,23 @@ class MlpClassifierHead(nn.Module):
         self.fc2 = nn.Linear(hidden_features, num_classes, bias=bias)
         self.drop = nn.Dropout(drop)
 
+    def reset(self, num_classes: int, pool_type: Optional[str] = None):
+        if pool_type is not None:
+            assert pool_type, 'Cannot disable pooling'
+            self.global_pool = SelectAdaptivePool2d(pool_type=pool_type, flatten=True)
+
+        self.fc2 = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
+
+    def forward(self, x, pre_logits: bool = False):
+        x = self.global_pool(x)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.norm(x)
+        x = self.drop(x)
+        return x if pre_logits else self.fc2(x)
+
+
+
 def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
@@ -204,6 +221,9 @@ class InceptionAttention(nn.Module):
         elif self.qk_nonlin == 'sigmoid':
             q = torch.sigmoid(q) 
             k = torch.sigmoid(k) 
+            # normllize the v
+            # we need to normalize v if float16
+            v = torch.nn.functional.normalize(v, dim=1, p=2) # B, H, W, d
  
         bh, d, _, _ = q.shape # q have H and W
         bh_, d_, H_, W_ = v.shape
@@ -238,6 +258,18 @@ class InceptionAttention(nn.Module):
             attn = attn / Z # B, H, N, F
             attn = rearrange(attn, 'b h n d -> b (h d) n')
             attn = attn.view(B, C, H, W) # B, C, H, W
+            # norm inf 
+            if torch.isnan(attn).any():
+                # early NaN
+                print("out has nan")
+                print("norm", Z.min(),Z.max())
+                print("attn", attn.min(), attn.max())
+                print("q_2d", q.min(), q.max())
+                print("k_sum", k_sum.min(), k_sum.max())
+                print("context", context.min(), context.max())
+                raise ValueError("Stop here due to NaN")
+        
+
 
             return self.to_out(attn)
 
@@ -302,7 +334,20 @@ class InceptionAttention(nn.Module):
                 attn = torch.einsum('bdhw,bdfhw->bfhw',q, window_kv)
                 norm = torch.einsum('bdhw,bdhw->bhw',q, window_k)
                 attn = attn / (norm.unsqueeze(1) + 1e-6)
+                
                 attn = attn.reshape(B, C, H, W) # B, C, H, W
+                if torch.isnan(attn).any():
+                    # early NaN
+                    print("out has nan")
+                    print("norm", norm.min(),norm.max())
+                    print("attn", attn.min(), attn.max())
+                    print("q_2d", q.min(), q.max())
+                    print("window_kv", window_kv.min(), window_kv.max())
+                    print("window_k", window_k.min(), window_k.max())
+                    raise ValueError("Stop here due to NaN")
+            
+
+
                 # (b,h*d_,H,W)
                 output_attn_list.append(attn)
                         
@@ -426,17 +471,16 @@ class HieraInceptFormer(nn.Module):
 
         dp_rates = [x.tolist() for x in torch.linspace(0, drop_path_rate, sum(depths)).split(depths)]
         prev_chs = dims[0]
-        print("dp_rates", dp_rates)
         # feature resolution stages, each consisting of multiple residual blocks
         self.stages = nn.Sequential()
+
         for i in range(num_stage):
-            
             out_chs = dims[i]
             for block_depth in range(depths[i]):
                 self.stages.append(HieraInceptFormerStage(
-                    dim=prev_chs,
+                    dim=out_chs,
                     mlp_dim=out_chs * mlp_ratios[i],
-                    heads= dims[i] // 64,  # heads = dim // 64
+                    heads= out_chs // 96,  # heads = dim // 64
                     qk_dim_compression= qk_dim_compression[i],
                     kv_token_num_compression= kv_token_num_compression[i],
                     dropout= dp_rates[i][block_depth] if isinstance(dp_rates[i], list) else dp_rates[i],
@@ -446,23 +490,26 @@ class HieraInceptFormer(nn.Module):
                     inception_merge = inception_merge,
                     do_padding = do_padding,
                 ))
-                if block_depth < depths[i] - 1:
-                    self.stages.append(nn.Conv2d(prev_chs, out_chs, kernel_size=3, stride=2, padding=1))
+            if i < num_stage - 1:  # no downsample on last stage
+                self.stages.append(nn.Conv2d(out_chs, dims[i+1], kernel_size=3, stride=2, padding=1))
             prev_chs = out_chs
             self.feature_info += [dict(num_chs=prev_chs, module=f'stages.{i}')]
 
-
-
         self.num_features = prev_chs
+        self.head_drop = nn.Dropout(drop_rate)
+        # self.head = nn.Linear(
+        #     prev_chs, num_classes) if num_classes > 0 else nn.Identity()
         self.head = MlpClassifierHead(self.num_features, num_classes, pool_type=self.global_pool, drop=drop_rate)
         self.head_hidden_size = self.head.num_features
-        self.apply(self._init_weights)
 
-    def _init_weights(self, m):
-        if isinstance(m, (nn.Conv2d, nn.Linear)):
-            trunc_normal_(m.weight, std=.02)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+        # self.head_hidden_size = self.num_features
+    #     self.apply(self._init_weights)
+
+    # def _init_weights(self, m):
+    #     if isinstance(m, (nn.Conv2d, nn.Linear)):
+    #         trunc_normal_(m.weight, std=.02)
+    #         if m.bias is not None:
+    #             nn.init.constant_(m.bias, 0)
 
     @torch.jit.ignore
     def group_matcher(self, coarse=False):
@@ -481,6 +528,12 @@ class HieraInceptFormer(nn.Module):
     def reset_classifier(self, num_classes: int, global_pool: Optional[str] = None):
         self.num_classes = num_classes
         self.head.reset(num_classes, global_pool)
+
+    @torch.jit.ignore
+    def set_grad_checkpointing(self, enable=True):
+        for s in self.stages:
+            s.grad_checkpointing = enable
+
 
     @torch.jit.ignore
     def set_grad_checkpointing(self, enable=True):
@@ -549,15 +602,23 @@ class HieraInceptFormer(nn.Module):
 
     def forward_features(self, x):
         x = self.stem(x)
-        x = self.stages(x)
+        # x = self.stages(x)
+        for layer_num, layer in enumerate(self.stages):
+            x = layer(x)
         return x
 
     def forward_head(self, x, pre_logits: bool = False):
         return self.head(x, pre_logits=pre_logits) if pre_logits else self.head(x)
 
+
     def forward(self, x):
         x = self.forward_features(x)
+        # if x.shape[2] == self.num_features and len(x.shape) == 4:
+        #     x = rearrange(x, 'b c h w -> b (h w) c')  # flatten for head
+        #     x = x.mean(dim=1)  # global pool
+
         x = self.forward_head(x)
+        # if NaN detected, stop
         return x
 
 
@@ -612,7 +673,7 @@ def _create_hiera_inception_former(variant, pretrained=False, **kwargs):
 def hiera_inception_former_tiny_w0(pretrained=False, **kwargs):
     model_args = dict(
         depths=(3, 3, 9, 3), dims=(96, 192, 384, 768),
-        windows=[[0],[0],[0],[0]]
+        windows=[[2,4,8],[2,4,8],[1,2,4],[0]]
     )
     return _create_hiera_inception_former('hiera_inception_former_tiny', pretrained=pretrained, **dict(model_args, **kwargs))
 
