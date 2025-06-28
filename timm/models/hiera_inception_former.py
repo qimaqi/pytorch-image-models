@@ -141,7 +141,7 @@ class InceptionAttention(nn.Module):
                         kv_token_num_compression=0, 
                         dropout = 0., 
                         windows=[0], 
-                        qk_nonlin='elu', 
+                        qk_nonlin='sigmoid', 
                         inception_attn='integral_map_conv2d', 
                         inception_merge='cat', 
                         do_padding=False, 
