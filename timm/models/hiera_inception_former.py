@@ -25,6 +25,30 @@ from time import time
 # helpers
 # from einops import einsum
 
+class Conv2d_BN(torch.nn.Sequential):
+    def __init__(self, a, b, ks=1, stride=1, pad=0, dilation=1,
+                 groups=1, bn_weight_init=1):
+        super().__init__()
+        self.add_module('c', torch.nn.Conv2d(
+            a, b, ks, stride, pad, dilation, groups, bias=False))
+        self.add_module('bn', torch.nn.BatchNorm2d(b))
+        torch.nn.init.constant_(self.bn.weight, bn_weight_init)
+        torch.nn.init.constant_(self.bn.bias, 0)
+
+    @torch.no_grad()
+    def fuse(self):
+        c, bn = self._modules.values()
+        w = bn.weight / (bn.running_var + bn.eps)**0.5
+        w = c.weight * w[:, None, None, None]
+        b = bn.bias - bn.running_mean * bn.weight / \
+            (bn.running_var + bn.eps)**0.5
+        m = torch.nn.Conv2d(w.size(1) * self.c.groups, w.size(
+            0), w.shape[2:], stride=self.c.stride, padding=self.c.padding, dilation=self.c.dilation, groups=self.c.groups,
+            device=c.weight.device)
+        m.weight.data.copy_(w)
+        m.bias.data.copy_(b)
+        return m
+    
 
 
 class MlpClassifierHead(nn.Module):
@@ -438,15 +462,16 @@ class HieraInceptFormer(nn.Module):
             global_pool='avg',
             depths=(3, 3, 9, 3),
             dims=(96, 192, 384, 768),
+            heads_dim = 96,
             norm_layer=nn.BatchNorm2d,
             act_layer=nn.GELU,
             mlp_ratios=(4, 4, 4, 3),
             drop_rate=0.,
             drop_path_rate=0.,
             windows=[(0,), (0,), (0,), (0,)],
-            inception_attn='conv2d', 
+            inception_attn='integral_map_conv2d', 
             inception_merge='mean', 
-            do_padding=False, 
+            do_padding=True, 
             qk_dim_compression=(0, 0, 0, 0), 
             kv_token_num_compression=(0, 0, 0, 0),
             qk_nonlin='sigmoid',
@@ -464,10 +489,10 @@ class HieraInceptFormer(nn.Module):
         self.drop_rate = drop_rate
         self.feature_info = []
 
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
-            norm_layer(dims[0])
-        )
+        self.stem = torch.nn.Sequential(Conv2d_BN(in_chans, dims[0] // 4, 3, 2, 1), torch.nn.ReLU(),
+                                Conv2d_BN(dims[0] // 4, dims[0] // 2, 3, 2, 1), torch.nn.ReLU(),
+                                Conv2d_BN(dims[0] // 2, dims[0], 3, 2, 1)
+                           )
 
         dp_rates = [x.tolist() for x in torch.linspace(0, drop_path_rate, sum(depths)).split(depths)]
         prev_chs = dims[0]
@@ -480,7 +505,7 @@ class HieraInceptFormer(nn.Module):
                 self.stages.append(HieraInceptFormerStage(
                     dim=out_chs,
                     mlp_dim=out_chs * mlp_ratios[i],
-                    heads= out_chs // 96,  # heads = dim // 64
+                    heads= out_chs //  heads_dim,
                     qk_dim_compression= qk_dim_compression[i],
                     kv_token_num_compression= kv_token_num_compression[i],
                     dropout= dp_rates[i][block_depth] if isinstance(dp_rates[i], list) else dp_rates[i],
@@ -669,13 +694,42 @@ def _create_hiera_inception_former(variant, pretrained=False, **kwargs):
 
 
 
+
+
 @register_model
 def hiera_inception_former_tiny_w0(pretrained=False, **kwargs):
     model_args = dict(
-        depths=(3, 3, 9, 3), dims=(96, 192, 384, 768),
-        windows=[[2,4,8],[2,4,8],[1,2,4],[0]]
+        depths=(0, 2, 8, 10), dims=(64, 128, 256, 384),
+        windows=[[0],[0],[0],[0]],
+        heads_dim=32,
     )
-    return _create_hiera_inception_former('hiera_inception_former_tiny', pretrained=pretrained, **dict(model_args, **kwargs))
+    return _create_hiera_inception_former('hiera_inception_former_tiny_w0', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+@register_model
+def hiera_inception_former_small_w0(pretrained=False, **kwargs):
+    model_args = dict(
+        depths=(1, 2, 8, 10), dims=(96, 192, 320, 448),
+        windows=[[0],[0],[0],[0]],
+        heads_dim=32,
+    )
+    return _create_hiera_inception_former('hiera_inception_former_small_w0', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+
+@register_model
+def hiera_inception_former_base_w0(pretrained=False, **kwargs):
+    model_args = dict(
+        depths=(4, 6, 8, 10), dims=(128, 256, 384, 512),
+        windows=[[0],[0],[0],[0]],
+        heads_dim=32,
+    )
+    return _create_hiera_inception_former('hiera_inception_former_base_w0', pretrained=pretrained, **dict(model_args, **kwargs))
+
+
+
+
+
 
 
 # @register_model

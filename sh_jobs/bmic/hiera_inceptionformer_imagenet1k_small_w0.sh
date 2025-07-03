@@ -22,7 +22,7 @@ conda activate timm
 cd /usr/bmicnas02/data-biwi-01/qimaqi_data/workspace/medical_journal/ConvPixelFormer/pytorch-image-models
 
 
-./distributed_train.sh 1 --data-dir /usr/bmicnas02/data-biwi-01/bmicdatasets-originals/Originals/ILSVRC2012_imagenet/imagenet --model hiera_inception_former_tiny --sched cosine --epochs 150 --warmup-epochs 5 --lr 1e-4 --batch-size 64 --amp -j 1 --num-classes 1000 --amp-dtype float16 --opt adamw
+./distributed_train.sh 1 --data-dir /usr/bmicnas02/data-biwi-01/bmicdatasets-originals/Originals/ILSVRC2012_imagenet/imagenet --model hiera_inception_former_small_w0 --sched cosine --epochs 150 --warmup-epochs 5 --lr 1e-4 --batch-size 512 --amp -j 1 --num-classes 1000 --amp-dtype float16 --opt adamw
 # post padding time:
 # 
 # 
